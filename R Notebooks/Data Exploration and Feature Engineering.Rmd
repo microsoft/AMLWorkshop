@@ -1,0 +1,297 @@
+---
+title: "Data Exploration and Feature Engineering"
+output: html_notebook
+---
+
+## Initialize Environment
+
+```{r}
+
+
+library("tidyverse") # Data munging functions
+library("zoo")   # Feature engineering rolling aggregates
+
+
+```
+
+
+
+## Data Sources
+
+
+The data for this example comes from 4 different sources which are: real-time telemetry data collected from machines, error messages, and historical maintenance records that include failures and machine information such as type and age. 
+
+
+### Telemetry
+
+The first data source is the telemetry time-series data which consists of voltage, rotation, pressure and vibration measurements collected from 100 machines in real time averaged over every hour collected during the year 2015. Below, we provide first 10 records of the first machine with machineID=1. A summary of the whole dataset is also provided.
+
+```{r}
+telemetry <- read_csv("../Data/telemetry.csv")
+
+# format datetime field which comes in as.character
+telemetry$datetime <- as.POSIXct(telemetry$datetime,
+                                 format="%m/%d/%Y %I:%M:%S %p",
+                                 tz="UTC")
+
+cat("Total Number of telemetry records:", nrow(telemetry))
+range(telemetry$datetime)
+head(telemetry,10)
+tail(telemetry,10)
+summary(telemetry)
+
+```
+
+As an example, below is a plot of voltage values for two machineIDs for January 2015.
+
+```{r}
+theme_set(theme_bw())  # theme for figures
+options(repr.plot.width = 8, repr.plot.height = 6)
+
+ggplot(data = telemetry %>% filter(machineID %in% 1:2, 
+                                 datetime > as.POSIXct("2015-01-01"),
+                                 datetime < as.POSIXct("2015-02-01")),
+       aes(x = datetime, y = volt, col = factor(machineID))) +
+  geom_line(alpha = 0.5) +
+  labs(y = "voltage", color = "machineID") +
+  facet_wrap(~machineID, ncol=1)
+
+
+```
+
+### Errors
+
+The second major data source is the error logs. These are non-breaking errors thrown while the machine is still operational and do not constitute as failures. The error date and times are rounded to the closest hour since the telemetry data is collected at an hourly rate.
+
+
+```{r}
+# download errors dataset
+errors <- read_csv("../Data/errors.csv")
+# format datetime and errorID fields
+errors$datetime <- as.POSIXct(errors$datetime,
+                              format="%m/%d/%Y %I:%M:%S %p", 
+                              tz="UTC")
+errors$errorID <- as.factor(errors$errorID)
+
+cat("Total Number of error records:",nrow(errors))
+errors[c(1:5, nrow(errors)-4:1),]
+
+```
+
+```{r}
+options(repr.plot.width = 5, repr.plot.height = 3)
+ggplot(errors, aes(x = errorID)) + 
+    geom_histogram(fill = "orange", stat="count") + 
+    labs(title = "Errors by type", x = "error types")
+```
+```{r}
+options(repr.plot.width = 6, repr.plot.height = 5)
+ggplot(errors %>% filter(machineID < 4), 
+       aes(x = errorID, fill = factor(machineID))) + 
+    geom_histogram(color = "black", stat="count") + 
+    labs(title = "MachineID errors by type", x = "error types", fill="MachineID")+
+    facet_wrap(~machineID, ncol = 1)
+```
+
+```{r}
+options(repr.plot.width = 7, repr.plot.height = 5)
+ggplot(errors %>% filter(machineID == 4), 
+       aes(y = errorID, x = datetime)) + 
+    geom_point(color = "black", alpha = 0.5) + 
+    labs(title = "MachineID 4 errors", x = "Date")
+```
+
+### Machines
+
+This data set includes some information about the machines which are model type and age which is years in service.
+
+```{r}
+machines <- read_csv("../Data/machines.csv")
+# format model field
+machines$model <- as.factor(machines$model)
+
+cat("Total number of machines:", nrow(machines))
+machines[c(1:5, nrow(machines)-4:0),]
+summary(machines)
+```
+
+```{r}
+options(repr.plot.width = 8, repr.plot.height = 6)
+ggplot(machines, aes(x = age, fill = model)) + 
+    geom_histogram(color = "black") + 
+    labs(title = "Machines", x = "age (years)") +
+    facet_wrap(~model)
+```
+
+### Failures
+
+These are the records of component replacements due to failures. Each record has a date and time, machine ID and failed component type.
+
+
+```{r}
+failures <- read_csv("../Data/failures.csv")
+
+# format datetime and failure fields
+failures$datetime <- as.POSIXct(failures$datetime,
+                                format="%m/%d/%Y %I:%M:%S %p", 
+                                tz="UTC")
+
+
+cat("Total number of failures:", nrow(failures))
+failures[c(1:5, nrow(failures)-4:0),]
+```
+
+## Feature Engineering
+
+The first step in predictive maintenance applications is feature engineering which requires bringing the different data sources together to create features that best describe a machines's health condition at a given point in time. In the next sections, different type of feature engineering methods are used to create features based on the properties of each data source.
+
+### Lag Features from Telemetry
+
+Telemetry data almost always comes with time-stamps which makes it suitable for calculating lagging features. A common method is to pick a window size for the lag features to be created and compute rolling aggregate measures such as mean, standard deviation, minimum, maximum, etc. to represent the short term history of the telemetry over the lag window. In the following, rolling mean and standard deviation of the telemetry data over the last 24 hour lag window is calculated for every 3 hours.
+
+```{r}
+# calculate the rolling mean and rolling standard deviation 
+# on the last 24 hour lag window (width=3), for every 3 hours (by=3)
+# for each machine ID.
+telemetryfeat <- telemetry %>%
+    arrange(machineID, datetime) %>% 
+    group_by(machineID) %>%
+    mutate(voltmean = rollapply(volt, width = 24, FUN = mean, align = "right", fill = NA, by = 3),
+           rotatemean = rollapply(rotate, width = 24, FUN = mean, align = "right", fill = NA, by = 3),
+           pressuremean = rollapply(pressure, width = 24, FUN = mean, align = "right", fill = NA, by = 3),
+           vibrationmean = rollapply(vibration, width = 24, FUN = mean, align = "right", fill = NA, by = 3),
+           voltsd = rollapply(volt, width = 24, FUN = sd, align = "right", fill = NA, by = 3),
+           rotatesd = rollapply(rotate, width = 24, FUN = sd, align = "right", fill = NA, by = 3),
+           pressuresd = rollapply(pressure, width = 24, FUN = sd, align = "right", fill = NA, by = 3),
+           vibrationsd = rollapply(vibration, width = 24, FUN = sd, align = "right", fill = NA, by = 3)) %>%
+    select(datetime, machineID, voltmean, rotatemean, pressuremean, vibrationmean, 
+           voltsd, rotatesd, pressuresd, vibrationsd ) %>%
+    filter(!is.na(voltmean), !is.na(voltsd)) %>% 
+    ungroup()
+
+cat("Number of rows:", nrow(telemetryfeat))
+head(telemetryfeat)
+```
+
+### Lag Features from Errors
+
+Similar to telemetry, errors also come with time-stamps. However, unlike telemetry that had numerical values, errors have categorical values denoting the type of error that occured at a time-stamp. In this case, aggregating methods such as averaging does not apply. Counting the different categories is a more viable approach where  lagging counts of different types of errors that occured in the lag window are calculated. Below we create such lagging counts from the errors received.
+
+```{r}
+
+# create a column for each error type
+errorcount <- errors %>% select(datetime, machineID, errorID) %>% 
+  mutate(error1 = as.integer(errorID == "error1"), 
+         error2 = as.integer(errorID == "error2"),
+         error3 = as.integer(errorID == "error3"),
+         error4 = as.integer(errorID == "error4"),
+         error5 = as.integer(errorID == "error5"))
+
+# sum the duplicate errors in an hour
+errorcount <- errorcount %>% 
+  group_by(machineID,datetime)%>%
+  summarise(error1sum = sum(error1), 
+            error2sum = sum(error2), 
+            error3sum = sum(error3), 
+            error4sum = sum(error4), 
+            error5sum = sum(error5)) %>%
+  ungroup()
+
+head(errorcount)
+```
+
+```{r}
+# align errors with telemetry datetime field
+errorfeat <- telemetry %>% 
+    select(datetime, machineID) %>%
+    left_join(errorcount, by = c("datetime", "machineID"))
+
+# replace missing values
+errorfeat[is.na(errorfeat)] <- 0
+
+cat("Number of rows:", nrow(errorfeat))
+head(errorfeat)
+summary(errorfeat)
+```
+
+```{r}
+# count the number of errors of different types in the last 24 hours,  for every 3 hours
+errorfeat <- errorfeat %>% 
+    arrange(machineID, datetime) %>%
+    group_by(machineID) %>%
+    mutate(error1count = rollapply(error1sum, width = 24, FUN = sum, align = "right", fill = NA, by = 3),
+           error2count = rollapply(error2sum, width = 24, FUN = sum, align = "right", fill = NA, by = 3),
+           error3count = rollapply(error3sum, width = 24, FUN = sum, align = "right", fill = NA, by = 3),
+           error4count = rollapply(error4sum, width = 24, FUN = sum, align = "right", fill = NA, by = 3),
+           error5count = rollapply(error5sum, width = 24, FUN = sum, align = "right", fill = NA, by = 3)) %>%
+    select(datetime, machineID, error1count, error2count, error3count, error4count, error5count) %>%
+    filter(!is.na(error1count)) %>% 
+    ungroup()
+
+cat("Number of rows:", nrow(errorfeat))
+head(errorfeat)
+summary(errorfeat)
+```
+
+### Machine Features
+
+The machine features are used directly as they are since they hold descriptive information about the type of the machines and their ages which is the years in service. If the years in service information has been received in the form of dates denoting the date of first service then a transformation would have been necessary to turn those into a numeric values indicating the years in service.
+
+
+
+
+```{r}
+# telemetry and error features have the same datetime 
+finalfeat <- data.frame(telemetryfeat, errorfeat[,-c(1:2)])
+
+# merge with machine features 
+finalfeat <- finalfeat %>% 
+    left_join(machines, by = c("machineID"))
+
+head(finalfeat, 10)
+cat("The final set of features are:",paste0(names(finalfeat), ","))
+
+cat("Number of rows:", nrow(finalfeat))
+
+```
+
+## Label Construction
+
+When using multi-class classification for predicting failure due to a problem, labeling is done by taking a time window  prior to the failure of an asset and labeling the feature records that fall into that window as âabout to fail due to a problemâ  while labeling all other records as ânormalâ. This time window should be picked according to the business case where in some situations it may be enough to predict failures hours in advance while in others days or weeks maybe needed to allow for the arrival of parts to be replaced as an example.
+
+The prediction problem for this example scenerio is to estimate the probability that a machine will fail in the near future due to a failure of a certain component. More specifically, the goal is to compute the probability that a machine will fail in the next 24 hours due to a certain component failure (component 1,2,3 or 4). In the following, labelling is done by labeling all the feature records that fall into the 24 hours window before a failure due to component 1, component 2, component 3 and component 4 as comp1, comp2, comp3 and comp4 respectively.The rest of the records are labeled as "none" indicating, there is no failure within the next 24 hours.
+
+```{r}
+head(failures, 20)
+nrow(distinct(failures, datetime, machineID))
+```
+
+```{r}
+# left join final features with failures on machineID then mutate a column for datetime difference
+# filter date difference for the prediction horizon which is 24 hours
+labeledfailures <- finalfeat %>%
+    select(datetime, machineID) %>%
+    left_join(failures, by = c("machineID")) %>%
+    mutate(failure = difftime(datetime.y, datetime.x, units = "hours") >= 0 &
+                 difftime(datetime.y, datetime.x, units = "hours") <= 24) %>%
+    filter(failure == TRUE) %>%
+    select(datetime = datetime.x, machineID, failure)
+
+
+
+head(labeledfailures, 10)
+cat("Number of rows:", nrow(labeledfailures))
+```
+
+```{r}
+labeledfeatures <- left_join(finalfeat, labeledfailures, by= c("datetime", "machineID"))
+labeledfeatures$failure[is.na(labeledfeatures$failure)]<-FALSE
+
+labeledfeatures %>% group_by(failure) %>% count(failure) %>% head()
+
+head(labeledfeatures, 10)
+
+cat("Number of rows:", nrow(labeledfeatures))
+```
+
+
